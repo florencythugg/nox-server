@@ -14,7 +14,8 @@ app.add_middleware(
 )
 
 STREAM_OPTS = {
-    "format": "bestaudio/best",
+    # Берём строго прямой HTTP-поток (mp3/m4a), исключаем m3u8/hls плейлисты, которые не играет <audio>
+    "format": "bestaudio[protocol^=http][protocol!=m3u8][protocol!=m3u8_native]/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -35,25 +36,41 @@ async def stream_track(q: str, request: Request):
         raise HTTPException(status_code=400, detail="Parameter 'q' is required")
 
     audio_url = None
+    mime_type = "audio/mpeg"
     last_err = ""
 
-    # Пробуем сначала SoundCloud (не блокирует IP Render), затем YouTube
-    for prefix in [f"scsearch1:{q}", f"ytsearch1:{q} official audio"]:
+    for prefix in [f"scsearch3:{q}", f"ytsearch2:{q} audio"]:
         try:
             with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
                 info = ydl.extract_info(prefix, download=False)
-                track = info["entries"][0] if ("entries" in info and info["entries"]) else info
-                if track and track.get("url"):
-                    audio_url = track["url"]
+                entries = info.get("entries") if isinstance(info, dict) and "entries" in info else [info]
+                for track in (entries or []):
+                    if not track:
+                        continue
+                    url = track.get("url") or ""
+                    # Пропускаем .m3u8 плейлисты, ищем прямой аудиофайл
+                    if url and ".m3u8" not in url:
+                        audio_url = url
+                        ext = track.get("ext", "")
+                        if ext in ("m4a", "mp4"):
+                            mime_type = "audio/mp4"
+                        elif ext == "webm":
+                            mime_type = "audio/webm"
+                        else:
+                            mime_type = "audio/mpeg"
+                        break
+                if audio_url:
                     break
         except Exception as e:
             last_err = str(e)
             continue
 
     if not audio_url:
-        raise HTTPException(status_code=502, detail=f"Stream not found: {last_err}")
+        raise HTTPException(status_code=502, detail=f"Direct audio not found: {last_err}")
 
-    headers = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
@@ -66,7 +83,7 @@ async def stream_track(q: str, request: Request):
 
     return StreamingResponse(
         iter_stream(),
-        media_type="audio/mpeg",
+        media_type=mime_type,
         headers={
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-cache",
