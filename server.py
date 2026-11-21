@@ -1,3 +1,4 @@
+import re
 import asyncio
 import yt_dlp
 import httpx
@@ -19,12 +20,16 @@ PIPED_INSTANCES = [
     "https://pipedapi.tokhmi.xyz",
     "https://api.piped.projectsegfau.lt",
     "https://pipedapi.smnz.de",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
 ]
 
 INVIDIOUS_INSTANCES = [
     "https://invidious.nerdvpn.de",
     "https://inv.nadeko.net",
     "https://yt.artemislena.eu",
+    "https://invidious.privacyredirect.com",
+    "https://iv.ggtyler.dev",
 ]
 
 STREAM_OPTS = {
@@ -35,8 +40,14 @@ STREAM_OPTS = {
     "extract_flat": False,
 }
 
+def clean_query_text(q: str) -> str:
+    # Убираем (feat. ...), [Explicit], (Remastered) для более точного поиска
+    cleaned = re.sub(r"\s*[\(\[].*?[\)\]]", "", q)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or q
+
 async def check_piped(host: str, query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=4.5) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
         s = await client.get(f"{host}/search", params={"q": f"{query} audio", "filter": "music_songs"})
         items = s.json().get("items", []) if s.status_code == 200 else []
         if not items:
@@ -56,7 +67,7 @@ async def check_piped(host: str, query: str):
     return None
 
 async def check_invidious(host: str, query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=4.5) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
         s = await client.get(f"{host}/api/v1/search", params={"q": f"{query} audio", "type": "video"})
         if s.status_code == 200 and s.json():
             vid_id = s.json()[0].get("videoId")
@@ -70,8 +81,8 @@ async def check_invidious(host: str, query: str):
     return None
 
 async def check_audius(query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=4.5) as client:
-        au = await client.get("https://discoveryprovider.audius.co/v1/tracks/search", params={"query": query, "limit": 3})
+    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
+        au = await client.get("https://discoveryprovider.audius.co/v1/tracks/search", params={"query": query, "limit": 5})
         if au.status_code == 200:
             for item in au.json().get("data", []):
                 tid = item.get("id")
@@ -84,7 +95,7 @@ async def check_audius(query: str):
     return None
 
 def check_ytdlp_sync(query: str):
-    for prefix in [f"scsearch2:{query}", f"ytsearch1:{query} audio"]:
+    for prefix in [f"scsearch3:{query}", f"ytsearch2:{query} audio"]:
         try:
             with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
                 info = ydl.extract_info(prefix, download=False)
@@ -97,7 +108,8 @@ def check_ytdlp_sync(query: str):
             continue
     return None
 
-async def resolve_fast(query: str):
+async def resolve_fast(raw_query: str):
+    query = clean_query_text(raw_query)
     tasks = [
         *[asyncio.create_task(check_piped(h, query)) for h in PIPED_INSTANCES],
         *[asyncio.create_task(check_invidious(h, query)) for h in INVIDIOUS_INSTANCES],
