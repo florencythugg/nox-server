@@ -14,17 +14,11 @@ app.add_middleware(
 )
 
 STREAM_OPTS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch1",
     "extract_flat": False,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "ios", "web"]
-        }
-    }
 }
 
 @app.get("/")
@@ -40,22 +34,26 @@ async def stream_track(q: str, request: Request):
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Parameter 'q' is required")
 
-    try:
-        with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{q} audio", download=False)
-            if "entries" in info and info["entries"]:
-                track = info["entries"][0]
-            else:
-                track = info
-            audio_url = track.get("url")
-            if not audio_url:
-                raise HTTPException(status_code=404, detail="Audio stream URL unavailable")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    audio_url = None
+    last_err = ""
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-    }
+    # Пробуем сначала SoundCloud (не блокирует IP Render), затем YouTube
+    for prefix in [f"scsearch1:{q}", f"ytsearch1:{q} official audio"]:
+        try:
+            with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
+                info = ydl.extract_info(prefix, download=False)
+                track = info["entries"][0] if ("entries" in info and info["entries"]) else info
+                if track and track.get("url"):
+                    audio_url = track["url"]
+                    break
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    if not audio_url:
+        raise HTTPException(status_code=502, detail=f"Stream not found: {last_err}")
+
+    headers = {}
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
@@ -68,7 +66,7 @@ async def stream_track(q: str, request: Request):
 
     return StreamingResponse(
         iter_stream(),
-        media_type="audio/mp4",
+        media_type="audio/mpeg",
         headers={
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-cache",
