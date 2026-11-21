@@ -17,18 +17,17 @@ app.add_middleware(
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.tokhmi.xyz",
-    "https://api.piped.projectsegfau.lt",
-    "https://pipedapi.smnz.de",
+    "https://api.piped.private.coffee",
     "https://pipedapi.adminforge.de",
-    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.leptons.xyz",
 ]
 
 INVIDIOUS_INSTANCES = [
-    "https://invidious.nerdvpn.de",
     "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
     "https://yt.artemislena.eu",
-    "https://invidious.privacyredirect.com",
+    "https://invidious.f5.si",
     "https://iv.ggtyler.dev",
 ]
 
@@ -40,80 +39,117 @@ STREAM_OPTS = {
     "extract_flat": False,
 }
 
-def clean_query_text(q: str) -> str:
-    # Убираем (feat. ...), [Explicit], (Remastered) для более точного поиска
-    cleaned = re.sub(r"\s*[\(\[].*?[\)\]]", "", q)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or q
+def norm(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
-async def check_piped(host: str, query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
-        s = await client.get(f"{host}/search", params={"q": f"{query} audio", "filter": "music_songs"})
-        items = s.json().get("items", []) if s.status_code == 200 else []
-        if not items:
-            s2 = await client.get(f"{host}/search", params={"q": query, "filter": "videos"})
-            items = s2.json().get("items", []) if s2.status_code == 200 else []
-        if items:
-            vid_url = items[0].get("url", "")
-            vid_id = vid_url.split("v=")[-1] if "v=" in vid_url else vid_url.strip("/")
-            if vid_id:
-                st = await client.get(f"{host}/streams/{vid_id}")
-                if st.status_code == 200:
-                    streams = st.json().get("audioStreams", [])
-                    direct = [a for a in streams if a.get("url") and ".m3u8" not in a["url"]]
-                    if direct:
-                        direct.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-                        return direct[0]["url"], direct[0].get("mimeType", "audio/mp4"), False
+def is_strict_match(candidate_title: str, candidate_author: str, artist: str, title: str) -> bool:
+    """Проверяем, что найденный аудиопоток реально соответствует нужному артисту и треку."""
+    haystack = f"{norm(candidate_title)} {norm(candidate_author)}"
+    n_title = norm(title)
+    n_artist = norm(artist)
+
+    if not n_title:
+        return False
+
+    # Отсекаем каверы, караоке, замедленные версии и ремиксы, если их не просили
+    bad_words = ["karaoke", "караоке", "cover", "кавер", "instrumental", "минус", "slowed", "nightcore", "8d audio", "reaction", "реакция"]
+    for bw in bad_words:
+        if bw in haystack and bw not in n_title:
+            return False
+
+    # Проверяем совпадение названия трека
+    title_words = [w for w in n_title.split() if len(w) >= 2]
+    if title_words:
+        matched_title = sum(1 for w in title_words if w in haystack)
+        if matched_title / len(title_words) < 0.7:
+            return False
+    elif n_title not in haystack:
+        return False
+
+    # Проверяем совпадение артиста
+    if n_artist:
+        artist_words = [w for w in n_artist.split() if len(w) >= 2]
+        if artist_words:
+            matched_artist = sum(1 for w in artist_words if w in haystack)
+            if matched_artist == 0:
+                return False
+        elif n_artist not in haystack:
+            return False
+
+    return True
+
+async def check_piped(host: str, artist: str, title: str):
+    q = f"{artist} - {title}".strip(" -")
+    async with httpx.AsyncClient(follow_redirects=True, timeout=6.5) as client:
+        for filt in ["music_songs", "videos"]:
+            s = await client.get(f"{host}/search", params={"q": q, "filter": filt})
+            if s.status_code != 200:
+                continue
+            items = s.json().get("items", [])[:5]
+            for item in items:
+                cand_title = item.get("title", "")
+                cand_author = item.get("uploaderName", "")
+                if not is_strict_match(cand_title, cand_author, artist, title):
+                    continue
+                vid_url = item.get("url", "")
+                vid_id = vid_url.split("v=")[-1] if "v=" in vid_url else vid_url.strip("/")
+                if vid_id:
+                    st = await client.get(f"{host}/streams/{vid_id}")
+                    if st.status_code == 200:
+                        streams = st.json().get("audioStreams", [])
+                        direct = [a for a in streams if a.get("url") and ".m3u8" not in a["url"]]
+                        if direct:
+                            direct.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+                            return direct[0]["url"], direct[0].get("mimeType", "audio/mp4"), False
     return None
 
-async def check_invidious(host: str, query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
-        s = await client.get(f"{host}/api/v1/search", params={"q": f"{query} audio", "type": "video"})
-        if s.status_code == 200 and s.json():
-            vid_id = s.json()[0].get("videoId")
-            if vid_id:
-                st = await client.get(f"{host}/api/v1/videos/{vid_id}")
-                if st.status_code == 200:
-                    fmts = st.json().get("adaptiveFormats", [])
-                    audio_fmts = [f for f in fmts if str(f.get("type", "")).startswith("audio/") and f.get("url")]
-                    if audio_fmts:
-                        return audio_fmts[0]["url"], "audio/mp4", False
+async def check_invidious(host: str, artist: str, title: str):
+    q = f"{artist} - {title}".strip(" -")
+    async with httpx.AsyncClient(follow_redirects=True, timeout=6.5) as client:
+        s = await client.get(f"{host}/api/v1/search", params={"q": q, "type": "video"})
+        if s.status_code == 200 and isinstance(s.json(), list):
+            for item in s.json()[:5]:
+                cand_title = item.get("title", "")
+                cand_author = item.get("author", "")
+                if not is_strict_match(cand_title, cand_author, artist, title):
+                    continue
+                vid_id = item.get("videoId")
+                if vid_id:
+                    st = await client.get(f"{host}/api/v1/videos/{vid_id}")
+                    if st.status_code == 200:
+                        fmts = st.json().get("adaptiveFormats", [])
+                        audio_fmts = [f for f in fmts if str(f.get("type", "")).startswith("audio/") and f.get("url")]
+                        if audio_fmts:
+                            return audio_fmts[0]["url"], "audio/mp4", False
     return None
 
-async def check_audius(query: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
-        au = await client.get("https://discoveryprovider.audius.co/v1/tracks/search", params={"query": query, "limit": 5})
-        if au.status_code == 200:
-            for item in au.json().get("data", []):
-                tid = item.get("id")
-                if tid:
-                    stream_endpoint = f"https://discoveryprovider.audius.co/v1/tracks/{tid}/stream"
-                    head_res = await client.head(stream_endpoint)
-                    final_url = str(head_res.url)
-                    if final_url and head_res.status_code in (200, 206):
-                        return final_url, "audio/mpeg", True
-    return None
-
-def check_ytdlp_sync(query: str):
-    for prefix in [f"scsearch3:{query}", f"ytsearch2:{query} audio"]:
+def check_ytdlp_sync(artist: str, title: str):
+    q = f"{artist} - {title}".strip(" -")
+    for prefix in [f"scsearch5:{q}", f"ytsearch3:{q} audio"]:
         try:
             with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
                 info = ydl.extract_info(prefix, download=False)
                 entries = info.get("entries") if isinstance(info, dict) and "entries" in info else [info]
                 for track in (entries or []):
-                    url = (track or {}).get("url", "")
+                    if not track:
+                        continue
+                    cand_title = track.get("title", "")
+                    cand_author = track.get("uploader", "") or track.get("artist", "")
+                    if not is_strict_match(cand_title, cand_author, artist, title):
+                        continue
+                    url = track.get("url", "")
                     if url and ".m3u8" not in url:
                         return url, "audio/mpeg", False
         except Exception:
             continue
     return None
 
-async def resolve_fast(raw_query: str):
-    query = clean_query_text(raw_query)
+async def resolve_exact_track(artist: str, title: str):
     tasks = [
-        *[asyncio.create_task(check_piped(h, query)) for h in PIPED_INSTANCES],
-        *[asyncio.create_task(check_invidious(h, query)) for h in INVIDIOUS_INSTANCES],
-        asyncio.create_task(check_audius(query)),
+        *[asyncio.create_task(check_piped(h, artist, title)) for h in PIPED_INSTANCES],
+        *[asyncio.create_task(check_invidious(h, artist, title)) for h in INVIDIOUS_INSTANCES],
     ]
     for fut in asyncio.as_completed(tasks):
         try:
@@ -127,7 +163,7 @@ async def resolve_fast(raw_query: str):
             continue
 
     loop = asyncio.get_event_loop()
-    yt_res = await loop.run_in_executor(None, check_ytdlp_sync, query)
+    yt_res = await loop.run_in_executor(None, check_ytdlp_sync, artist, title)
     if yt_res and yt_res[0]:
         return yt_res
     return None, None, False
@@ -141,25 +177,36 @@ def health():
     return {"status": "ok", "service": "Nox Full HQ"}
 
 @app.get("/api/resolve")
-async def resolve_endpoint(q: str):
-    if not q or not q.strip():
-        raise HTTPException(status_code=400, detail="Query required")
-    url, mime, direct_cors = await resolve_fast(q.strip())
+async def resolve_endpoint(q: str = "", artist: str = "", title: str = ""):
+    if not title and q:
+        if " - " in q:
+            artist, title = q.split(" - ", 1)
+        else:
+            title = q
+    if not title.strip():
+        raise HTTPException(status_code=400, detail="Track title required")
+
+    url, mime, direct_cors = await resolve_exact_track(artist.strip(), title.strip())
     if not url:
-        raise HTTPException(status_code=404, detail="Track not found in full catalogs")
+        raise HTTPException(status_code=404, detail="Exact full track not found")
     return {"url": url, "mime": mime, "direct": direct_cors}
 
 @app.get("/api/stream")
-async def stream_track(q: str, request: Request):
-    if not q or not q.strip():
-        raise HTTPException(status_code=400, detail="Parameter 'q' is required")
+async def stream_track(q: str = "", artist: str = "", title: str = "", request: Request = None):
+    if not title and q:
+        if " - " in q:
+            artist, title = q.split(" - ", 1)
+        else:
+            title = q
+    if not title.strip():
+        raise HTTPException(status_code=400, detail="Track title required")
 
-    audio_url, mime_type, _ = await resolve_fast(q.strip())
+    audio_url, mime_type, _ = await resolve_exact_track(artist.strip(), title.strip())
     if not audio_url:
-        raise HTTPException(status_code=502, detail="No playable full stream found")
+        raise HTTPException(status_code=502, detail="Exact stream not found")
 
     headers = {"User-Agent": "Mozilla/5.0"}
-    if "range" in request.headers:
+    if request and "range" in request.headers:
         headers["Range"] = request.headers["range"]
 
     async def iter_stream():
