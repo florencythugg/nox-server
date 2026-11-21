@@ -20,6 +20,11 @@ STREAM_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "extract_flat": False,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios", "web"]
+        }
+    }
 }
 
 @app.get("/")
@@ -37,7 +42,7 @@ async def stream_track(q: str, request: Request):
 
     try:
         with yt_dlp.YoutubeDL(STREAM_OPTS) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{q} official audio", download=False)
+            info = ydl.extract_info(f"ytsearch1:{q} audio", download=False)
             if "entries" in info and info["entries"]:
                 track = info["entries"][0]
             else:
@@ -48,7 +53,9 @@ async def stream_track(q: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    headers = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    }
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
